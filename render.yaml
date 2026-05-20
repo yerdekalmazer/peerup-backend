@@ -13,17 +13,17 @@ services:
     healthCheckPath: /
     autoDeploy: true         # git push → otomatik deploy
     envVars:
-      - key: DATABASE_URL          # Supabase pooler bağlantı dizesi
-        sync: false                # Render kurulumda elden gir (gizli)
-      - key: JWT_SECRET
+      - key: DATABASE_URL          # Supabase pooler bağlantı dizesi — kurulumda elden gir
         sync: false
-      - key: ADMIN_JWT_SECRET
-        sync: false
-      - key: ADMIN_PROXY_SECRET
-        sync: false
+      - key: JWT_SECRET            # Render otomatik üretir
+        generateValue: true
+      - key: ADMIN_JWT_SECRET      # Render otomatik üretir (Vercel'e de aynısını yapıştır)
+        generateValue: true
+      - key: ADMIN_PROXY_SECRET    # Render otomatik üretir
+        generateValue: true
       - key: SEED_ADMIN_EMAIL
         value: admin@peerup.com
       - key: SEED_ADMIN_PASSWORD
-        sync: false
+        sync: false                # kurulumda elden gir (örn. peerup1234)
       - key: SEED_ADMIN_NAME
         value: PeerUP Admin
