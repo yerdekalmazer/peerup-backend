@@ -1,0 +1,444 @@
+import { Router } from "express";
+import { prisma } from "../prisma";
+import { requireAdmin, hashPassword } from "../auth";
+import { serializeTeacher, safeParse } from "../serialize";
+
+export const adminRouter = Router();
+adminRouter.use(requireAdmin);
+
+const safeUser = { omit: { passwordHash: true } } as const;
+
+// ── GET /admin/me ────────────────────────────────────────────
+adminRouter.get("/me", async (req, res) => {
+  const admin = await prisma.adminUser.findUnique({
+    where: { id: req.adminId },
+    select: { id: true, email: true, name: true, role: true },
+  });
+  if (!admin) return res.status(404).json({ error: "Admin bulunamadı" });
+  res.json(admin);
+});
+
+// ── GET /admin/stats ─────────────────────────────────────────
+adminRouter.get("/stats", async (_req, res) => {
+  const [
+    teacherCount, userCount, sessionCount, categoryCount, chainCount,
+    upcoming, completed, cancelled, onlineTeachers,
+    teachers, categories, recentSessions, recentUsers, chains,
+  ] = await Promise.all([
+    prisma.teacher.count(),
+    prisma.user.count(),
+    prisma.session.count(),
+    prisma.category.count(),
+    prisma.skillChain.count(),
+    prisma.session.count({ where: { status: "upcoming" } }),
+    prisma.session.count({ where: { status: "completed" } }),
+    prisma.session.count({ where: { status: "cancelled" } }),
+    prisma.teacher.count({ where: { online: true } }),
+    prisma.teacher.findMany({ select: { rating: true, category: true } }),
+    prisma.category.findMany({ orderBy: { order: "asc" } }),
+    prisma.session.findMany({ orderBy: { createdAt: "desc" }, take: 6 }),
+    prisma.user.findMany({
+      orderBy: { createdAt: "desc" }, take: 6,
+      select: { id: true, name: true, email: true, avatar: true, avatarColor: true, role: true, createdAt: true },
+    }),
+    prisma.skillChain.findMany({ select: { totalReach: true } }),
+  ]);
+
+  const avgRating =
+    teachers.length > 0
+      ? teachers.reduce((s, t) => s + t.rating, 0) / teachers.length
+      : 0;
+
+  res.json({
+    totals: {
+      teachers: teacherCount,
+      users: userCount,
+      sessions: sessionCount,
+      categories: categoryCount,
+      chains: chainCount,
+      onlineTeachers,
+      avgRating: Number(avgRating.toFixed(2)),
+      totalReach: chains.reduce((s, c) => s + c.totalReach, 0),
+    },
+    sessions: { upcoming, completed, cancelled },
+    categoryDistribution: categories.map((c) => ({
+      label: c.label,
+      count: teachers.filter((t) => t.category === c.label).length,
+    })),
+    recentSessions,
+    recentUsers,
+  });
+});
+
+// ── Teachers ─────────────────────────────────────────────────
+adminRouter.get("/teachers", async (req, res) => {
+  const q = (req.query.q as string | undefined)?.trim();
+  const teachers = await prisma.teacher.findMany({
+    where: q
+      ? { OR: [{ name: { contains: q } }, { skill: { contains: q } }] }
+      : {},
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(teachers.map(serializeTeacher));
+});
+
+adminRouter.post("/teachers", async (req, res) => {
+  const b = req.body ?? {};
+  const name = String(b.name ?? "").trim();
+  const skill = String(b.skill ?? "").trim();
+  const category = String(b.category ?? "").trim();
+  if (!name || !skill || !category) {
+    return res.status(400).json({ error: "Ad, beceri ve kategori zorunludur" });
+  }
+  const avatar =
+    String(b.avatar ?? "").trim() ||
+    name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const created = await prisma.teacher.create({
+    data: {
+      name, skill, category, avatar,
+      avatarColor: String(b.avatarColor ?? "#6366F1"),
+      bio: String(b.bio ?? ""),
+      rating: Number(b.rating ?? 0),
+      reviews: Number(b.reviews ?? 0),
+      coinRate: Number(b.coinRate ?? 1),
+      sessionsCount: Number(b.sessionsCount ?? 0),
+      online: Boolean(b.online ?? false),
+      verified: Boolean(b.verified ?? false),
+      badges: JSON.stringify(Array.isArray(b.badges) ? b.badges : []),
+    },
+  });
+  res.status(201).json(serializeTeacher(created));
+});
+
+adminRouter.get("/teachers/:id", async (req, res) => {
+  const teacher = await prisma.teacher.findUnique({ where: { id: req.params.id } });
+  if (!teacher) return res.status(404).json({ error: "Öğretmen bulunamadı" });
+  res.json(serializeTeacher(teacher));
+});
+
+adminRouter.put("/teachers/:id", async (req, res) => {
+  const b = req.body ?? {};
+  const data: Record<string, unknown> = {};
+  const str = ["name", "skill", "category", "avatar", "avatarColor", "bio"];
+  const num = ["rating", "reviews", "coinRate", "sessionsCount"];
+  const bool = ["online", "verified"];
+  for (const k of str) if (b[k] !== undefined) data[k] = String(b[k]);
+  for (const k of num) if (b[k] !== undefined) data[k] = Number(b[k]);
+  for (const k of bool) if (b[k] !== undefined) data[k] = Boolean(b[k]);
+  if (b.badges !== undefined) {
+    data.badges = JSON.stringify(Array.isArray(b.badges) ? b.badges : []);
+  }
+  try {
+    const updated = await prisma.teacher.update({ where: { id: req.params.id }, data });
+    res.json(serializeTeacher(updated));
+  } catch {
+    res.status(404).json({ error: "Öğretmen güncellenemedi" });
+  }
+});
+
+adminRouter.delete("/teachers/:id", async (req, res) => {
+  try {
+    await prisma.teacher.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(404).json({ error: "Öğretmen silinemedi" });
+  }
+});
+
+// ── Users ────────────────────────────────────────────────────
+adminRouter.get("/users", async (req, res) => {
+  const q = (req.query.q as string | undefined)?.trim();
+  const users = await prisma.user.findMany({
+    where: q
+      ? { OR: [{ name: { contains: q } }, { email: { contains: q } }] }
+      : {},
+    orderBy: { createdAt: "desc" },
+    ...safeUser,
+  });
+  res.json(users);
+});
+
+adminRouter.post("/users", async (req, res) => {
+  const b = req.body ?? {};
+  const name = String(b.name ?? "").trim();
+  const email = String(b.email ?? "").trim().toLowerCase();
+  const password = String(b.password ?? "");
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: "Ad, e-posta ve parola zorunludur" });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ error: "Parola en az 6 karakter olmalı" });
+  }
+  const existing = await prisma.user.findUnique({ where: { email } });
+  if (existing) return res.status(409).json({ error: "Bu e-posta zaten kayıtlı" });
+
+  const avatar =
+    String(b.avatar ?? "").trim() ||
+    name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase();
+
+  const created = await prisma.user.create({
+    data: {
+      name, email, avatar,
+      passwordHash: await hashPassword(password),
+      avatarColor: String(b.avatarColor ?? "#6366F1"),
+      bio: String(b.bio ?? ""),
+      coins: Number(b.coins ?? 10),
+      role: b.role === "teacher" ? "teacher" : "student",
+    },
+    ...safeUser,
+  });
+  res.status(201).json(created);
+});
+
+adminRouter.put("/users/:id", async (req, res) => {
+  const b = req.body ?? {};
+  const data: Record<string, unknown> = {};
+  if (b.name !== undefined) data.name = String(b.name);
+  if (b.avatar !== undefined) data.avatar = String(b.avatar);
+  if (b.avatarColor !== undefined) data.avatarColor = String(b.avatarColor);
+  if (b.bio !== undefined) data.bio = String(b.bio);
+  if (b.coins !== undefined) data.coins = Number(b.coins);
+  if (b.role !== undefined) data.role = b.role === "teacher" ? "teacher" : "student";
+  if (b.status !== undefined) {
+    data.status = b.status === "suspended" ? "suspended" : "active";
+  }
+  if (b.password) {
+    if (String(b.password).length < 6) {
+      return res.status(400).json({ error: "Parola en az 6 karakter olmalı" });
+    }
+    data.passwordHash = await hashPassword(String(b.password));
+  }
+  try {
+    const updated = await prisma.user.update({
+      where: { id: req.params.id }, data, ...safeUser,
+    });
+    res.json(updated);
+  } catch {
+    res.status(404).json({ error: "Kullanıcı güncellenemedi" });
+  }
+});
+
+adminRouter.delete("/users/:id", async (req, res) => {
+  try {
+    await prisma.user.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(404).json({ error: "Kullanıcı silinemedi" });
+  }
+});
+
+// ── Sessions ─────────────────────────────────────────────────
+adminRouter.get("/sessions", async (req, res) => {
+  const status = req.query.status as string | undefined;
+  const sessions = await prisma.session.findMany({
+    where: status ? { status } : {},
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(sessions);
+});
+
+adminRouter.post("/sessions", async (req, res) => {
+  const b = req.body ?? {};
+  const teacherName = String(b.teacherName ?? "").trim();
+  const skill = String(b.skill ?? "").trim();
+  const date = String(b.date ?? "").trim();
+  const time = String(b.time ?? "").trim();
+  if (!teacherName || !skill || !date || !time) {
+    return res.status(400).json({ error: "Öğretmen, beceri, tarih ve saat zorunludur" });
+  }
+  const teacher = await prisma.teacher.findFirst({ where: { name: teacherName } });
+  const created = await prisma.session.create({
+    data: {
+      teacherName,
+      teacherAvatar: teacher?.avatar ?? String(b.teacherAvatar ?? ""),
+      avatarColor: teacher?.avatarColor ?? String(b.avatarColor ?? "#6366F1"),
+      skill, date, time,
+      duration: Number(b.duration ?? 60),
+      cost: Number(b.cost ?? 1),
+      type: String(b.type ?? "online"),
+      status: ["upcoming", "completed", "cancelled"].includes(String(b.status))
+        ? String(b.status) : "upcoming",
+    },
+  });
+  res.status(201).json(created);
+});
+
+adminRouter.put("/sessions/:id", async (req, res) => {
+  const b = req.body ?? {};
+  const data: Record<string, unknown> = {};
+  for (const k of ["teacherName", "skill", "date", "time", "type"]) {
+    if (b[k] !== undefined) data[k] = String(b[k]);
+  }
+  if (b.duration !== undefined) data.duration = Number(b.duration);
+  if (b.cost !== undefined) data.cost = Number(b.cost);
+  if (b.rating !== undefined) {
+    data.rating = b.rating === null ? null : Number(b.rating);
+  }
+  if (b.status !== undefined && ["upcoming", "completed", "cancelled"].includes(String(b.status))) {
+    data.status = String(b.status);
+  }
+  try {
+    const updated = await prisma.session.update({ where: { id: req.params.id }, data });
+    res.json(updated);
+  } catch {
+    res.status(404).json({ error: "Oturum güncellenemedi" });
+  }
+});
+
+adminRouter.delete("/sessions/:id", async (req, res) => {
+  try {
+    await prisma.session.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(404).json({ error: "Oturum silinemedi" });
+  }
+});
+
+// ── Categories ───────────────────────────────────────────────
+adminRouter.get("/categories", async (_req, res) => {
+  const categories = await prisma.category.findMany({ orderBy: { order: "asc" } });
+  res.json(categories);
+});
+
+adminRouter.post("/categories", async (req, res) => {
+  const label = String(req.body?.label ?? "").trim();
+  if (!label) return res.status(400).json({ error: "Kategori adı zorunludur" });
+  const last = await prisma.category.findFirst({ orderBy: { order: "desc" } });
+  const created = await prisma.category.create({
+    data: {
+      label,
+      icon: String(req.body?.icon ?? "grid-outline"),
+      order: Number(req.body?.order ?? (last?.order ?? 0) + 1),
+    },
+  });
+  res.status(201).json(created);
+});
+
+adminRouter.put("/categories/:id", async (req, res) => {
+  const b = req.body ?? {};
+  const data: Record<string, unknown> = {};
+  if (b.label !== undefined) data.label = String(b.label);
+  if (b.icon !== undefined) data.icon = String(b.icon);
+  if (b.order !== undefined) data.order = Number(b.order);
+  try {
+    const updated = await prisma.category.update({ where: { id: req.params.id }, data });
+    res.json(updated);
+  } catch {
+    res.status(404).json({ error: "Kategori güncellenemedi" });
+  }
+});
+
+adminRouter.delete("/categories/:id", async (req, res) => {
+  try {
+    await prisma.category.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(404).json({ error: "Kategori silinemedi" });
+  }
+});
+
+// ── Chains ───────────────────────────────────────────────────
+function mapNodes(nodes: unknown, skill: string) {
+  if (!Array.isArray(nodes)) return [];
+  return (nodes as Record<string, unknown>[]).map((n, i) => ({
+    name: String(n.name ?? ""),
+    shortName: String(n.shortName ?? n.avatar ?? ""),
+    avatar: String(n.avatar ?? ""),
+    avatarColor: String(n.avatarColor ?? "#6366F1"),
+    role: String(n.role ?? "student"),
+    skill,
+    sessions: Number(n.sessions ?? 0),
+    rating: Number(n.rating ?? 0),
+    isOnline: Boolean(n.isOnline ?? false),
+    joinedDate: n.joinedDate ? String(n.joinedDate) : null,
+    mockId: n.mockId ? String(n.mockId) : null,
+    parentMockId: n.parentMockId ? String(n.parentMockId) : null,
+    position: Number(n.position ?? i),
+  }));
+}
+
+adminRouter.get("/chains", async (_req, res) => {
+  const chains = await prisma.skillChain.findMany({
+    include: { nodes: { orderBy: { position: "asc" } } },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json(chains.map((c) => ({ ...c, gradient: safeParse(c.gradient) })));
+});
+
+adminRouter.post("/chains", async (req, res) => {
+  const b = req.body ?? {};
+  const skill = String(b.skill ?? "").trim();
+  const category = String(b.category ?? "").trim();
+  if (!skill || !category) {
+    return res.status(400).json({ error: "Beceri ve kategori zorunludur" });
+  }
+  const created = await prisma.skillChain.create({
+    data: {
+      skill, category,
+      color: String(b.color ?? "#6366F1"),
+      gradient: JSON.stringify(
+        Array.isArray(b.gradient) ? b.gradient : ["#4F46E5", "#7C3AED"],
+      ),
+      icon: String(b.icon ?? "git-network-outline"),
+      depth: Number(b.depth ?? 1),
+      totalReach: Number(b.totalReach ?? 0),
+      nodes: { create: mapNodes(b.nodes, skill) },
+    },
+    include: { nodes: true },
+  });
+  res.status(201).json({ ...created, gradient: safeParse(created.gradient) });
+});
+
+adminRouter.get("/chains/:id", async (req, res) => {
+  const chain = await prisma.skillChain.findUnique({
+    where: { id: req.params.id },
+    include: { nodes: { orderBy: { position: "asc" } } },
+  });
+  if (!chain) return res.status(404).json({ error: "Zincir bulunamadı" });
+  res.json({ ...chain, gradient: safeParse(chain.gradient) });
+});
+
+adminRouter.put("/chains/:id", async (req, res) => {
+  const b = req.body ?? {};
+  const data: Record<string, unknown> = {};
+  if (b.skill !== undefined) data.skill = String(b.skill);
+  if (b.category !== undefined) data.category = String(b.category);
+  if (b.color !== undefined) data.color = String(b.color);
+  if (b.icon !== undefined) data.icon = String(b.icon);
+  if (b.depth !== undefined) data.depth = Number(b.depth);
+  if (b.totalReach !== undefined) data.totalReach = Number(b.totalReach);
+  if (b.gradient !== undefined) {
+    data.gradient = JSON.stringify(Array.isArray(b.gradient) ? b.gradient : []);
+  }
+  try {
+    await prisma.skillChain.update({ where: { id: req.params.id }, data });
+    if (Array.isArray(b.nodes)) {
+      const current = await prisma.skillChain.findUnique({
+        where: { id: req.params.id }, select: { skill: true },
+      });
+      await prisma.chainNode.deleteMany({ where: { chainId: req.params.id } });
+      await prisma.chainNode.createMany({
+        data: mapNodes(b.nodes, current?.skill ?? "").map((n) => ({
+          ...n, chainId: req.params.id,
+        })),
+      });
+    }
+    const chain = await prisma.skillChain.findUnique({
+      where: { id: req.params.id },
+      include: { nodes: { orderBy: { position: "asc" } } },
+    });
+    res.json({ ...chain, gradient: safeParse(chain!.gradient) });
+  } catch {
+    res.status(404).json({ error: "Zincir güncellenemedi" });
+  }
+});
+
+adminRouter.delete("/chains/:id", async (req, res) => {
+  try {
+    await prisma.skillChain.delete({ where: { id: req.params.id } });
+    res.json({ ok: true });
+  } catch {
+    res.status(404).json({ error: "Zincir silinemedi" });
+  }
+});

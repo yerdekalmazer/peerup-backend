@@ -1,0 +1,191 @@
+// PeerUP backend — mobil uygulama ve admin panelinin paylaştığı veritabanı
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Admin panel kullanıcıları
+model AdminUser {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String
+  passwordHash String
+  role         String    @default("admin")
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+}
+
+/// Mobil uygulama kullanıcıları
+model User {
+  id            String           @id @default(cuid())
+  name          String
+  email         String           @unique
+  passwordHash  String
+  avatar        String           @default("")
+  avatarColor   String           @default("#6366F1")
+  coins         Float            @default(10)
+  role          String           @default("student")
+  bio           String           @default("")
+  university    String           @default("")
+  department    String           @default("")
+  status        String           @default("active")
+  skillsTeach   String           @default("[]") // JSON dizisi
+  skillsLearn   String           @default("[]") // JSON dizisi
+  savedTeachers String           @default("[]") // kaydedilen öğretmen id'leri
+  createdAt     DateTime         @default(now())
+  sessions      Session[]
+  conversations Conversation[]
+  notifications Notification[]
+  reviews       Review[]
+  transactions  CoinTransaction[]
+}
+
+/// Öğretmenler
+model Teacher {
+  id            String   @id @default(cuid())
+  name          String
+  skill         String
+  category      String
+  rating        Float    @default(0)
+  reviews       Int      @default(0)
+  coinRate      Float    @default(1)
+  online        Boolean  @default(false)
+  avatar        String
+  avatarColor   String   @default("#6366F1")
+  bio           String   @default("")
+  sessionsCount Int      @default(0)
+  badges        String   @default("[]")
+  verified      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  reviewList    Review[]
+}
+
+/// Beceri kategorileri
+model Category {
+  id    String @id @default(cuid())
+  label String
+  icon  String @default("grid-outline")
+  order Int    @default(0)
+}
+
+/// Ders oturumları / rezervasyonlar
+model Session {
+  id            String   @id @default(cuid())
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId        String?
+  teacherName   String
+  teacherAvatar String   @default("")
+  avatarColor   String   @default("#6366F1")
+  skill         String
+  date          String
+  time          String
+  duration      Int      @default(60)
+  cost          Float    @default(1)
+  status        String   @default("upcoming")
+  type          String   @default("online")
+  rating        Int?
+  createdAt     DateTime @default(now())
+  review        Review?
+}
+
+/// Mentor zincirleri
+model SkillChain {
+  id         String      @id @default(cuid())
+  skill      String
+  category   String
+  color      String      @default("#6366F1")
+  gradient   String      @default("[]")
+  icon       String      @default("git-network-outline")
+  depth      Int         @default(1)
+  totalReach Int         @default(0)
+  createdAt  DateTime    @default(now())
+  nodes      ChainNode[]
+}
+
+/// Zincir düğümleri
+model ChainNode {
+  id           String     @id @default(cuid())
+  chain        SkillChain @relation(fields: [chainId], references: [id], onDelete: Cascade)
+  chainId      String
+  name         String
+  shortName    String
+  avatar       String
+  avatarColor  String     @default("#6366F1")
+  role         String
+  skill        String
+  sessions     Int        @default(0)
+  rating       Float      @default(0)
+  isOnline     Boolean    @default(false)
+  joinedDate   String?
+  mockId       String?
+  parentMockId String?
+  position     Int        @default(0)
+}
+
+/// Sohbet konuşmaları (kullanıcı ↔ karşı taraf)
+model Conversation {
+  id         String    @id @default(cuid())
+  owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId    String
+  peerName   String
+  peerAvatar String
+  peerColor  String    @default("#6366F1")
+  online     Boolean   @default(false)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  messages   Message[]
+}
+
+/// Sohbet mesajları
+model Message {
+  id             String       @id @default(cuid())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+  fromOwner      Boolean      @default(true)
+  text           String
+  read           Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+}
+
+/// Bildirimler
+model Notification {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  type      String   @default("info")
+  title     String
+  body      String   @default("")
+  icon      String   @default("notifications-outline")
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+/// Oturum / öğretmen değerlendirmeleri
+model Review {
+  id        String   @id @default(cuid())
+  teacher   Teacher  @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  teacherId String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  sessionId String?  @unique
+  rating    Int
+  comment   String   @default("")
+  createdAt DateTime @default(now())
+}
+
+/// SkillCoin işlem geçmişi
+model CoinTransaction {
+  id          String   @id @default(cuid())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  amount      Float
+  type        String   @default("spend")
+  description String   @default("")
+  createdAt   DateTime @default(now())
+}

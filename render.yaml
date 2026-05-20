@@ -1,0 +1,29 @@
+# Render Blueprint — peerup-backend ücretsiz canlı yayın
+# Kurulum: https://dashboard.render.com/blueprints → New Blueprint Instance → bu repo
+
+services:
+  - type: web
+    name: peerup-backend
+    runtime: node
+    plan: free               # ücretsiz katman (15 dk hareketsizlikte uyur, ~50 sn cold start)
+    region: frankfurt        # Türkiye'ye en yakın free bölge
+    branch: main
+    buildCommand: npm install && npx prisma generate
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true         # git push → otomatik deploy
+    envVars:
+      - key: DATABASE_URL          # Supabase pooler bağlantı dizesi
+        sync: false                # Render kurulumda elden gir (gizli)
+      - key: JWT_SECRET
+        sync: false
+      - key: ADMIN_JWT_SECRET
+        sync: false
+      - key: ADMIN_PROXY_SECRET
+        sync: false
+      - key: SEED_ADMIN_EMAIL
+        value: admin@peerup.com
+      - key: SEED_ADMIN_PASSWORD
+        sync: false
+      - key: SEED_ADMIN_NAME
+        value: PeerUP Admin
