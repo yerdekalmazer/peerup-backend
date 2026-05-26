@@ -10,6 +10,7 @@ import { sessionsRouter } from "./routes/sessions";
 import { messagesRouter } from "./routes/messages";
 import { notificationsRouter } from "./routes/notifications";
 import { profileRouter } from "./routes/profile";
+import { reportsRouter } from "./routes/reports";
 import { adminRouter } from "./routes/admin";
 import { openapiSpec } from "./openapi";
 
@@ -48,6 +49,7 @@ app.use("/api/sessions", sessionsRouter);
 app.use("/api/conversations", messagesRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/profile", profileRouter);
+app.use("/api/reports", reportsRouter);
 app.use("/api/admin", adminRouter);
 
 // 404

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../prisma";
 import { requireUser } from "../auth";
 import { publicUser, serializeTeacher, safeParse } from "../serialize";
+import { sendPushToUser } from "../push";
 
 export const profileRouter = Router();
 profileRouter.use(requireUser);
@@ -49,6 +50,20 @@ profileRouter.put("/", async (req, res) => {
   res.json(publicUser(user));
 });
 
+// PUT /profile/push-token — Expo push token kaydet ({ token, platform })
+// Token boş string ise kaydı sıfırlar (logout / izin reddi durumu).
+profileRouter.put("/push-token", async (req, res) => {
+  const raw = req.body?.token;
+  const token = typeof raw === "string" && raw.startsWith("ExponentPushToken") ? raw : null;
+  const platform = typeof req.body?.platform === "string" ? req.body.platform : null;
+
+  await prisma.user.update({
+    where: { id: req.userId },
+    data: { pushToken: token, pushPlatform: platform },
+  });
+  res.json({ ok: true });
+});
+
 // POST /profile/topup — SkillCoin yükle
 profileRouter.post("/topup", async (req, res) => {
   const amount = Number(req.body?.amount ?? 0);
@@ -76,6 +91,11 @@ profileRouter.post("/topup", async (req, res) => {
       body: `Hesabına ${amount} SkillCoin eklendi.`,
       icon: "logo-bitcoin",
     },
+  });
+  void sendPushToUser(req.userId!, {
+    title: "SkillCoin yüklendi 💰",
+    body: `Hesabına ${amount} SkillCoin eklendi.`,
+    data: { type: "coin" },
   });
   res.json(publicUser(user));
 });

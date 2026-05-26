@@ -75,6 +75,8 @@ model User {
   skillsTeach   String           @default("[]") // JSON dizisi
   skillsLearn   String           @default("[]") // JSON dizisi
   savedTeachers String           @default("[]") // kaydedilen öğretmen id'leri
+  pushToken     String?
+  pushPlatform  String?           // "ios" | "android" | "web"
   createdAt     DateTime         @default(now())
   sessions      Session[]
   conversations Conversation[]
@@ -127,6 +129,10 @@ model Session {
   status        String   @default("upcoming")
   type          String   @default("online")
   rating        Int?
+  callStarted   Boolean  @default(false)
+  callRoomId    String?
+  callStartedAt DateTime?
+  callEndedAt   DateTime?
   createdAt     DateTime @default(now())
   review        Review?
 }
