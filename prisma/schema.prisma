@@ -10,14 +10,50 @@ datasource db {
 }
 
 /// Admin panel kullanıcıları
+/// role: "super_admin" | "admin" | "moderator"
 model AdminUser {
-  id           String    @id @default(cuid())
-  email        String    @unique
+  id           String          @id @default(cuid())
+  email        String          @unique
   name         String
   passwordHash String
-  role         String    @default("admin")
+  role         String          @default("admin")
   lastLoginAt  DateTime?
-  createdAt    DateTime  @default(now())
+  createdAt    DateTime        @default(now())
+  auditLogs    AdminAuditLog[]
+  resolved     Report[]        @relation("ResolvedBy")
+}
+
+/// Admin aksiyonlarının denetim günlüğü
+model AdminAuditLog {
+  id         String    @id @default(cuid())
+  admin      AdminUser @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  adminId    String
+  action     String
+  targetType String    @default("")
+  targetId   String    @default("")
+  payload    String    @default("{}") // JSON
+  createdAt  DateTime  @default(now())
+
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
+}
+
+/// Kullanıcı / öğretmen / oturum şikayetleri
+model Report {
+  id           String     @id @default(cuid())
+  targetType   String     // "user" | "teacher" | "session"
+  targetId     String
+  reporterName String     @default("")
+  reporterId   String     @default("")
+  reason       String
+  note         String     @default("")
+  status       String     @default("open") // open | resolved | dismissed
+  resolvedBy   AdminUser? @relation("ResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedById String?
+  resolvedAt   DateTime?
+  createdAt    DateTime   @default(now())
+
+  @@index([status, createdAt])
 }
 
 /// Mobil uygulama kullanıcıları
@@ -34,6 +70,8 @@ model User {
   university    String           @default("")
   department    String           @default("")
   status        String           @default("active")
+  bannedAt      DateTime?
+  bannedReason  String           @default("")
   skillsTeach   String           @default("[]") // JSON dizisi
   skillsLearn   String           @default("[]") // JSON dizisi
   savedTeachers String           @default("[]") // kaydedilen öğretmen id'leri

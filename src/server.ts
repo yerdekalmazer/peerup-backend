@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import type { Request, Response, NextFunction } from "express";
 import cors from "cors";
+import swaggerUi from "swagger-ui-express";
 
 import { authRouter } from "./routes/auth";
 import { publicRouter } from "./routes/public";
@@ -10,6 +11,7 @@ import { messagesRouter } from "./routes/messages";
 import { notificationsRouter } from "./routes/notifications";
 import { profileRouter } from "./routes/profile";
 import { adminRouter } from "./routes/admin";
+import { openapiSpec } from "./openapi";
 
 const app = express();
 
@@ -26,6 +28,18 @@ app.use((req, _res, next) => {
 app.get("/", (_req, res) => {
   res.json({ service: "peerup-backend", status: "ok" });
 });
+
+// Swagger UI ve ham OpenAPI JSON
+app.get("/docs/openapi.json", (_req, res) => {
+  res.json(openapiSpec);
+});
+app.use(
+  "/docs",
+  swaggerUi.serve,
+  swaggerUi.setup(openapiSpec, {
+    customSiteTitle: "PeerUP API Docs",
+  }),
+);
 
 // API rotaları (mobil uygulama ile uyum için /api ön eki)
 app.use("/api/auth", authRouter);

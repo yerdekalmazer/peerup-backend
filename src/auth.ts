@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response, NextFunction, RequestHandler } from "express";
 
 const USER_SECRET = process.env.JWT_SECRET ?? "dev-user-secret";
 const ADMIN_SECRET = process.env.ADMIN_JWT_SECRET ?? "dev-admin-secret";
@@ -69,6 +69,17 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   } catch {
     res.status(401).json({ error: "Admin oturumu geçersiz" });
   }
+}
+
+/** Belirli admin rollerini ister; requireAdmin sonrasında zincirlenir. */
+export function requireRole(...roles: string[]): RequestHandler {
+  return (req, res, next) => {
+    if (!req.adminRole || !roles.includes(req.adminRole)) {
+      res.status(403).json({ error: "Bu işlem için yetkin yok" });
+      return;
+    }
+    next();
+  };
 }
 
 /** Token varsa kullanıcıyı tanır, yoksa da devam eder (opsiyonel kimlik). */
