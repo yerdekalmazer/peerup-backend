@@ -77,6 +77,10 @@ model User {
   savedTeachers String           @default("[]") // kaydedilen öğretmen id'leri
   pushToken     String?
   pushPlatform  String?           // "ios" | "android" | "web"
+  /// Mentor başvurusu: "pending" | "approved" | "rejected" | null
+  mentorAppStatus  String?
+  mentorAppMessage String?
+  mentorAppAt      DateTime?
   createdAt     DateTime         @default(now())
   sessions      Session[]
   conversations Conversation[]
@@ -101,6 +105,10 @@ model Teacher {
   sessionsCount Int      @default(0)
   badges        String   @default("[]")
   verified      Boolean  @default(false)
+  /// Haftalık müsait saatler. JSON dizi:
+  /// [{ "dayOfWeek": 1, "start": "09:00", "end": "12:00" }, ...]
+  /// dayOfWeek: 0=Pazar, 1=Pazartesi, ..., 6=Cumartesi (JS Date.getDay()).
+  availability  String   @default("[]")
   createdAt     DateTime @default(now())
   reviewList    Review[]
 }
@@ -180,6 +188,7 @@ model Conversation {
   peerAvatar String
   peerColor  String    @default("#6366F1")
   online     Boolean   @default(false)
+  blocked    Boolean   @default(false)
   createdAt  DateTime  @default(now())
   updatedAt  DateTime  @updatedAt
   messages   Message[]
@@ -192,6 +201,7 @@ model Message {
   conversationId String
   fromOwner      Boolean      @default(true)
   text           String
+  imageUrl       String?
   read           Boolean      @default(false)
   createdAt      DateTime     @default(now())
 }

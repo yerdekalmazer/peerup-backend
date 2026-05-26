@@ -109,25 +109,80 @@ authRouter.post("/admin/login", async (req, res) => {
   });
 });
 
-// POST /auth/reset-password — basit parola sıfırlama (e-posta ile)
-authRouter.post("/reset-password", async (req, res) => {
+/**
+ * Şifre sıfırlama akışı.
+ *
+ * Çift adım:
+ *   1) POST /auth/forgot-password { email }
+ *      → 6 haneli OTP üretir, bellekte 10 dk saklar, kullanıcı email'i
+ *        kayıtlı değilse bile aynı 200 cevabı döner (kullanıcı varlığı sızdırmaz).
+ *   2) POST /auth/reset-password { email, code, password }
+ *      → kod + email eşleşirse parolayı günceller, kodu siler.
+ *
+ * In-memory store: process restart sonrası kaybolur. Production'da Redis
+ * veya DB tablosu kullanılmalı. Kod kullanıcıya nasıl iletilir:
+ *   - Üretimde: email servisi (Resend, Postmark, SES vb.) — TODO.
+ *   - Dev/staging'de: response içinde `devCode` döner ki UI test edilebilsin.
+ *     `NODE_ENV=production` ise `devCode` gönderilmez.
+ */
+type ResetEntry = { code: string; expiresAt: number; userId: string };
+const resetStore = new Map<string, ResetEntry>();
+const RESET_TTL_MS = 10 * 60 * 1000;
+
+function pruneResetStore() {
+  const now = Date.now();
+  for (const [email, entry] of resetStore.entries()) {
+    if (entry.expiresAt < now) resetStore.delete(email);
+  }
+}
+
+authRouter.post("/forgot-password", async (req, res) => {
+  pruneResetStore();
   const email = String(req.body?.email ?? "").trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: "E-posta zorunlu" });
+
+  const user = await prisma.user.findUnique({ where: { email } });
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+
+  // Sadece kayıtlı kullanıcılar için kod sakla, ama yine 200 döndür ki
+  // saldırgan hangi e-postaların kayıtlı olduğunu sıralayamasın.
+  if (user) {
+    resetStore.set(email, {
+      code,
+      expiresAt: Date.now() + RESET_TTL_MS,
+      userId: user.id,
+    });
+    console.log(`[auth] reset code for ${email}: ${code}`);
+    // TODO: production'da bu kodu email ile gönder.
+  }
+
+  const isDev = process.env.NODE_ENV !== "production";
+  res.json({ ok: true, ...(isDev && user ? { devCode: code } : {}) });
+});
+
+authRouter.post("/reset-password", async (req, res) => {
+  pruneResetStore();
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const code = String(req.body?.code ?? "").trim();
   const password = String(req.body?.password ?? "");
-  if (!email || !password) {
-    return res.status(400).json({ error: "E-posta ve yeni parola zorunludur" });
+  if (!email || !code || !password) {
+    return res
+      .status(400)
+      .json({ error: "E-posta, kod ve yeni parola zorunludur" });
   }
   if (password.length < 6) {
     return res.status(400).json({ error: "Parola en az 6 karakter olmalı" });
   }
 
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user) {
-    return res.status(404).json({ error: "Bu e-posta ile kayıtlı kullanıcı yok" });
+  const entry = resetStore.get(email);
+  if (!entry || entry.expiresAt < Date.now() || entry.code !== code) {
+    return res.status(400).json({ error: "Kod hatalı veya süresi dolmuş" });
   }
 
   await prisma.user.update({
-    where: { id: user.id },
+    where: { id: entry.userId },
     data: { passwordHash: await hashPassword(password) },
   });
+  resetStore.delete(email);
   res.json({ ok: true });
 });

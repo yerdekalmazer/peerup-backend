@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { prisma } from "../prisma";
-import { serializeTeacher, serializeChain } from "../serialize";
+import { serializeTeacher, serializeChain, safeParse } from "../serialize";
 
 export const publicRouter = Router();
 
@@ -34,6 +34,66 @@ publicRouter.get("/teachers/:id", async (req, res) => {
   });
   if (!teacher) return res.status(404).json({ error: "Öğretmen bulunamadı" });
   res.json(serializeTeacher(teacher));
+});
+
+/**
+ * GET /teachers/:id/availability?date=YYYY-MM-DD
+ *
+ * Belirli bir tarihte mentor'un haftalık müsait aralıklarına düşen 30 dk'lık
+ * slotları döner. `bookedTimes` aynı tarihte bu öğretmen için zaten alınmış
+ * (upcoming) oturumların saatlerini içerir — frontend `availableTimes`
+ * içinden bunları çıkarır.
+ */
+publicRouter.get("/teachers/:id/availability", async (req, res) => {
+  const teacher = await prisma.teacher.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!teacher) return res.status(404).json({ error: "Öğretmen bulunamadı" });
+
+  const dateStr = String(req.query.date ?? "");
+  const date = new Date(`${dateStr}T00:00:00`);
+  if (!dateStr || Number.isNaN(date.getTime())) {
+    return res.status(400).json({ error: "date=YYYY-MM-DD gerekli" });
+  }
+  const dayOfWeek = date.getDay();
+
+  type Slot = { dayOfWeek: number; start: string; end: string };
+  const rules: Slot[] = safeParse(teacher.availability) as Slot[];
+  const todayRules = rules.filter((r) => r?.dayOfWeek === dayOfWeek);
+
+  // Aralıkları 30 dk slotlara aç
+  const availableTimes: string[] = [];
+  for (const r of todayRules) {
+    const [sh, sm] = r.start.split(":").map(Number);
+    const [eh, em] = r.end.split(":").map(Number);
+    let mins = sh * 60 + sm;
+    const end = eh * 60 + em;
+    while (mins + 30 <= end) {
+      const hh = String(Math.floor(mins / 60)).padStart(2, "0");
+      const mm = String(mins % 60).padStart(2, "0");
+      availableTimes.push(`${hh}:${mm}`);
+      mins += 30;
+    }
+  }
+
+  // Aynı gün için bu öğretmende alınmış upcoming oturumlar (frontend tarih
+  // formatı "26 Mayıs 2026" — Türkçe locale ile karşılaştırma)
+  const localized = date.toLocaleDateString("tr-TR", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+  const sessions = await prisma.session.findMany({
+    where: {
+      teacherName: teacher.name,
+      status: "upcoming",
+      date: localized,
+    },
+    select: { time: true },
+  });
+  const bookedTimes = sessions.map((s) => s.time);
+
+  res.json({ availableTimes, bookedTimes, dayOfWeek });
 });
 
 // GET /categories

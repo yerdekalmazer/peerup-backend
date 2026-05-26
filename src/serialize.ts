@@ -8,9 +8,14 @@ export function safeParse(s: string, fallback: unknown[] = []): any[] {
   }
 }
 
-/** Teacher: JSON `badges` alanını diziye çevirir, `sessions` takma adı ekler. */
+/** Teacher: JSON `badges`/`availability` alanlarını diziye çevirir, `sessions` takma adı ekler. */
 export function serializeTeacher(t: any) {
-  return { ...t, badges: safeParse(t.badges), sessions: t.sessionsCount };
+  return {
+    ...t,
+    badges: safeParse(t.badges),
+    availability: safeParse(t.availability ?? '[]'),
+    sessions: t.sessionsCount,
+  };
 }
 
 /** Session: mobil uygulamanın beklediği `teacher` takma adını ekler. */

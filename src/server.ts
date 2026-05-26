@@ -12,6 +12,7 @@ import { notificationsRouter } from "./routes/notifications";
 import { profileRouter } from "./routes/profile";
 import { reportsRouter } from "./routes/reports";
 import { adminRouter } from "./routes/admin";
+import { matchRouter } from "./routes/match";
 import { openapiSpec } from "./openapi";
 
 const app = express();
@@ -51,6 +52,7 @@ app.use("/api/notifications", notificationsRouter);
 app.use("/api/profile", profileRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/match-mentor", matchRouter);
 
 // 404
 app.use((_req, res) => {

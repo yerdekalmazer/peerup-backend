@@ -50,6 +50,62 @@ profileRouter.put("/", async (req, res) => {
   res.json(publicUser(user));
 });
 
+// DELETE /profile — hesabı kalıcı olarak siler.
+// Notification, Conversation, Review, CoinTransaction cascade ile silinir;
+// Session'larda userId SetNull yapılır (geçmiş istatistik için kayıt kalır).
+profileRouter.delete("/", async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  await prisma.user.delete({ where: { id: user.id } });
+  res.json({ ok: true });
+});
+
+// POST /profile/apply-mentor — student rolündeki kullanıcı mentor olmak için başvurur.
+// Aynı kullanıcı reddedildikten sonra tekrar başvurabilir; "approved" durumdaysa
+// veya zaten "teacher" rolündeyse yeniden başvuru reddedilir.
+profileRouter.post("/apply-mentor", async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  if (user.role === "teacher") {
+    return res.status(400).json({ error: "Zaten mentor rolündesin" });
+  }
+  if (user.mentorAppStatus === "pending") {
+    return res.status(400).json({ error: "Başvurun zaten incelemede" });
+  }
+  if (user.mentorAppStatus === "approved") {
+    return res.status(400).json({ error: "Başvurun onaylandı" });
+  }
+
+  const message = String(req.body?.message ?? "").trim();
+  if (message.length < 20) {
+    return res
+      .status(400)
+      .json({ error: "Lütfen en az 20 karakterlik bir açıklama yaz" });
+  }
+  if (message.length > 600) {
+    return res.status(400).json({ error: "Açıklama çok uzun" });
+  }
+
+  await prisma.user.update({
+    where: { id: req.userId },
+    data: {
+      mentorAppStatus: "pending",
+      mentorAppMessage: message,
+      mentorAppAt: new Date(),
+    },
+  });
+  await prisma.notification.create({
+    data: {
+      userId: req.userId!,
+      type: "info",
+      title: "Mentor başvurun alındı 🎓",
+      body: "İnceleme tamamlandığında haber vereceğiz.",
+      icon: "school-outline",
+    },
+  });
+  res.status(201).json({ ok: true });
+});
+
 // PUT /profile/push-token — Expo push token kaydet ({ token, platform })
 // Token boş string ise kaydı sıfırlar (logout / izin reddi durumu).
 profileRouter.put("/push-token", async (req, res) => {

@@ -9,10 +9,10 @@ function hhmm(d: Date): string {
   return d.toTimeString().slice(0, 5);
 }
 
-// GET /conversations — sohbet listesi
+// GET /conversations — sohbet listesi (engellenenler gizli)
 messagesRouter.get("/", async (req, res) => {
   const conversations = await prisma.conversation.findMany({
-    where: { ownerId: req.userId },
+    where: { ownerId: req.userId, blocked: false },
     orderBy: { updatedAt: "desc" },
     include: {
       messages: { orderBy: { createdAt: "desc" }, take: 1 },
@@ -89,11 +89,58 @@ messagesRouter.get("/:id/messages", async (req, res) => {
     messages: messages.map((m) => ({
       id: m.id,
       text: m.text,
+      imageUrl: m.imageUrl,
       fromMe: m.fromOwner,
       time: hhmm(m.createdAt),
       createdAt: m.createdAt,
     })),
   });
+});
+
+// POST /conversations/:id/block — sohbeti engelle (listeden gizler)
+messagesRouter.post("/:id/block", async (req, res) => {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
+  });
+  if (!conversation) {
+    return res.status(404).json({ error: "Sohbet bulunamadı" });
+  }
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { blocked: true },
+  });
+  res.json({ ok: true });
+});
+
+// POST /conversations/:id/unblock — sohbet engelini kaldır
+messagesRouter.post("/:id/unblock", async (req, res) => {
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: req.params.id, ownerId: req.userId },
+  });
+  if (!conversation) {
+    return res.status(404).json({ error: "Sohbet bulunamadı" });
+  }
+  await prisma.conversation.update({
+    where: { id: conversation.id },
+    data: { blocked: false },
+  });
+  res.json({ ok: true });
+});
+
+// GET /conversations/blocked — engellenen sohbetler
+messagesRouter.get("/blocked", async (req, res) => {
+  const items = await prisma.conversation.findMany({
+    where: { ownerId: req.userId, blocked: true },
+    orderBy: { updatedAt: "desc" },
+  });
+  res.json(
+    items.map((c) => ({
+      id: c.id,
+      user: c.peerName,
+      avatar: c.peerAvatar,
+      avatarColor: c.peerColor,
+    })),
+  );
 });
 
 // POST /conversations/:id/messages — mesaj gönder
@@ -104,12 +151,28 @@ messagesRouter.post("/:id/messages", async (req, res) => {
   if (!conversation) {
     return res.status(404).json({ error: "Sohbet bulunamadı" });
   }
+  if (conversation.blocked) {
+    return res.status(403).json({ error: "Bu sohbeti engellediniz" });
+  }
 
   const text = String(req.body?.text ?? "").trim();
-  if (!text) return res.status(400).json({ error: "Mesaj boş olamaz" });
+  const rawImageUrl = req.body?.imageUrl;
+  const imageUrl =
+    typeof rawImageUrl === "string" && rawImageUrl.startsWith("https://")
+      ? rawImageUrl
+      : null;
+  if (!text && !imageUrl) {
+    return res.status(400).json({ error: "Mesaj boş olamaz" });
+  }
 
   const message = await prisma.message.create({
-    data: { conversationId: conversation.id, fromOwner: true, text, read: true },
+    data: {
+      conversationId: conversation.id,
+      fromOwner: true,
+      text,
+      imageUrl,
+      read: true,
+    },
   });
   await prisma.conversation.update({
     where: { id: conversation.id },
@@ -119,6 +182,7 @@ messagesRouter.post("/:id/messages", async (req, res) => {
   res.status(201).json({
     id: message.id,
     text: message.text,
+    imageUrl: message.imageUrl,
     fromMe: true,
     time: hhmm(message.createdAt),
     createdAt: message.createdAt,

@@ -41,6 +41,14 @@ sessionsRouter.post("/", async (req, res) => {
     where: { name: teacherName },
   });
 
+  // Aynı saatte aynı mentor için başka upcoming rezervasyon var mı?
+  const clash = await prisma.session.findFirst({
+    where: { teacherName, date, time, status: "upcoming" },
+  });
+  if (clash) {
+    return res.status(409).json({ error: "Bu saat dolu, başka bir saat seç." });
+  }
+
   const session = await prisma.session.create({
     data: {
       userId: req.userId,

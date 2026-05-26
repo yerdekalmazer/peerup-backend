@@ -137,11 +137,23 @@ async function main() {
   // Kategoriler
   await prisma.category.createMany({ data: categories });
 
-  // Öğretmenler
+  // Öğretmenler — varsayılan haftalık müsaitlik: Pzt-Cum 09-12 & 13-17,
+  // Cumartesi 10-14. Pazar kapalı. (JS Date.getDay(): 0=Paz, 1=Pzt...)
+  const defaultAvailability = [
+    ...[1, 2, 3, 4, 5].flatMap((d) => [
+      { dayOfWeek: d, start: "09:00", end: "12:00" },
+      { dayOfWeek: d, start: "13:00", end: "17:00" },
+    ]),
+    { dayOfWeek: 6, start: "10:00", end: "14:00" },
+  ];
   const teacherRecords: Record<string, string> = {};
   for (const t of teachers) {
     const rec = await prisma.teacher.create({
-      data: { ...t, badges: JSON.stringify(t.badges) },
+      data: {
+        ...t,
+        badges: JSON.stringify(t.badges),
+        availability: JSON.stringify(defaultAvailability),
+      },
     });
     teacherRecords[t.name] = rec.id;
   }
