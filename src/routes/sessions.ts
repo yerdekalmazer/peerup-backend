@@ -7,11 +7,20 @@ import { sendPushToUser } from "../push";
 export const sessionsRouter = Router();
 sessionsRouter.use(requireUser);
 
-// GET /sessions?status= — oturum açmış kullanıcının oturumları
+// GET /sessions?status= — kullanıcının hem öğrenci hem mentor olarak gördüğü oturumlar.
+// Mentor "Başlat" butonunu kullanabilsin diye teacherName eşleşmesi de dahildir.
 sessionsRouter.get("/", async (req, res) => {
   const status = req.query.status as string | undefined;
+  const me = await prisma.user.findUnique({
+    where: { id: req.userId },
+    select: { name: true },
+  });
   const sessions = await prisma.session.findMany({
-    where: { userId: req.userId, ...(status ? { status } : {}) },
+    where: {
+      OR: [{ userId: req.userId }, { teacherName: me?.name ?? "__none__" }],
+      ...(status ? { status } : {}),
+    },
+    include: { groupSlot: { select: { id: true, mentorUserId: true } } },
     orderBy: { createdAt: "desc" },
   });
   res.json(sessions.map(serializeSession));
@@ -41,12 +50,17 @@ sessionsRouter.post("/", async (req, res) => {
     where: { name: teacherName },
   });
 
-  // Aynı saatte aynı mentor için başka upcoming rezervasyon var mı?
-  const clash = await prisma.session.findFirst({
+  // Aynı saatte aynı mentor için var olan upcoming rezervasyonları say.
+  // İlk kaydın maxParticipants değeri kapasiteyi belirler — grup oturumu
+  // ise birden fazla öğrenci aynı slot'a katılabilir.
+  const sameSlot = await prisma.session.findMany({
     where: { teacherName, date, time, status: "upcoming" },
   });
-  if (clash) {
-    return res.status(409).json({ error: "Bu saat dolu, başka bir saat seç." });
+  if (sameSlot.length > 0) {
+    const capacity = sameSlot[0].maxParticipants ?? 1;
+    if (sameSlot.length >= capacity) {
+      return res.status(409).json({ error: "Bu saat dolu, başka bir saat seç." });
+    }
   }
 
   const session = await prisma.session.create({
@@ -139,10 +153,13 @@ function jitsiRoomFor(sessionId: string) {
   return `peerup-${sessionId}`;
 }
 
-// POST /sessions/:id/call/start — sadece mentor başlatabilir
+// POST /sessions/:id/call/start — mentor başlatır. Grup oturumunda
+// aynı `groupSlotId`'ye bağlı tüm katılımcıların session'ları aynı oda ID'sini
+// alır ve hepsine push gider.
 sessionsRouter.post("/:id/call/start", async (req, res) => {
   const session = await prisma.session.findUnique({
     where: { id: req.params.id },
+    include: { groupSlot: true },
   });
   if (!session) return res.status(404).json({ error: "Oturum bulunamadı" });
   if (session.status !== "upcoming") {
@@ -151,37 +168,79 @@ sessionsRouter.post("/:id/call/start", async (req, res) => {
 
   const user = await prisma.user.findUnique({ where: { id: req.userId } });
   if (!user) return res.status(401).json({ error: "Kullanıcı bulunamadı" });
-  if (user.name !== session.teacherName) {
+
+  // Mentor kontrolü: grup'ta mentorUserId FK, bireyselde teacherName eşleşmesi
+  const isMentor = session.groupSlot
+    ? session.groupSlot.mentorUserId === user.id
+    : session.teacherName === user.name;
+  if (!isMentor) {
     return res.status(403).json({ error: "Sadece mentor görüşmeyi başlatabilir" });
   }
 
-  const updated = await prisma.session.update({
-    where: { id: session.id },
-    data: {
-      callStarted: true,
-      callRoomId: session.callRoomId ?? jitsiRoomFor(session.id),
-      callStartedAt: session.callStartedAt ?? new Date(),
-    },
-  });
+  // Grup oturumu için ortak oda; bireysel için session id'ye özgü oda
+  const roomId = session.groupSlot
+    ? `peerup-group-${session.groupSlot.id}`
+    : jitsiRoomFor(session.id);
+  const now = new Date();
 
-  if (session.userId) {
-    await prisma.notification.create({
+  if (session.groupSlot) {
+    // Slot'a bağlı tüm session'ları aynı anda başlat
+    await prisma.session.updateMany({
+      where: { groupSlotId: session.groupSlot.id, status: "upcoming" },
+      data: { callStarted: true, callRoomId: roomId, callStartedAt: now },
+    });
+    const participants = await prisma.session.findMany({
+      where: { groupSlotId: session.groupSlot.id, status: "upcoming" },
+      select: { id: true, userId: true },
+    });
+    for (const p of participants) {
+      if (!p.userId) continue;
+      await prisma.notification.create({
+        data: {
+          userId: p.userId,
+          type: "session",
+          title: "Grup dersi başladı 🎥",
+          body: `${session.teacherName} "${session.skill}" grup dersini başlattı.`,
+          icon: "videocam-outline",
+        },
+      });
+      void sendPushToUser(p.userId, {
+        title: "Grup dersi başladı 🎥",
+        body: `${session.teacherName} "${session.skill}" dersini başlattı.`,
+        data: { type: "session_call", sessionId: p.id },
+      });
+    }
+  } else {
+    await prisma.session.update({
+      where: { id: session.id },
       data: {
-        userId: session.userId,
-        type: "session",
-        title: "Mentor görüşmeyi başlattı 🎥",
-        body: `${session.teacherName} "${session.skill}" oturumunu başlattı, hemen katılabilirsin.`,
-        icon: "videocam-outline",
+        callStarted: true,
+        callRoomId: session.callRoomId ?? roomId,
+        callStartedAt: session.callStartedAt ?? now,
       },
     });
-    void sendPushToUser(session.userId, {
-      title: "Mentor görüşmeyi başlattı 🎥",
-      body: `${session.teacherName} "${session.skill}" oturumunu başlattı, hemen katılabilirsin.`,
-      data: { type: "session_call", sessionId: session.id },
-    });
+    if (session.userId) {
+      await prisma.notification.create({
+        data: {
+          userId: session.userId,
+          type: "session",
+          title: "Mentor görüşmeyi başlattı 🎥",
+          body: `${session.teacherName} "${session.skill}" oturumunu başlattı, hemen katılabilirsin.`,
+          icon: "videocam-outline",
+        },
+      });
+      void sendPushToUser(session.userId, {
+        title: "Mentor görüşmeyi başlattı 🎥",
+        body: `${session.teacherName} "${session.skill}" oturumunu başlattı, hemen katılabilirsin.`,
+        data: { type: "session_call", sessionId: session.id },
+      });
+    }
   }
 
-  res.json(serializeSession(updated));
+  const updated = await prisma.session.findUnique({
+    where: { id: session.id },
+    include: { groupSlot: true },
+  });
 });
 
 // POST /sessions/:id/call/end — mentor ya da öğrenci sonlandırabilir
@@ -243,6 +302,26 @@ sessionsRouter.post("/:id/review", async (req, res) => {
       comment,
     },
   });
+
+  // Mentor User olarak kayıtlıysa kazancını coin'e yaz.
+  const mentorUser = await prisma.user.findFirst({
+    where: { name: session.teacherName, role: "teacher" },
+  });
+  if (mentorUser && session.cost > 0) {
+    await prisma.user.update({
+      where: { id: mentorUser.id },
+      data: { coins: { increment: session.cost } },
+    });
+    await prisma.coinTransaction.create({
+      data: {
+        userId: mentorUser.id,
+        amount: session.cost,
+        type: "earn",
+        description: `${session.skill} oturumu kazancı`,
+      },
+    });
+  }
+
   await prisma.session.update({
     where: { id: session.id },
     data: { rating, status: "completed" },

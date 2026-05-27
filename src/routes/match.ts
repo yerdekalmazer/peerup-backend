@@ -2,13 +2,16 @@
  * AI mentor eşleştirme.
  *
  * POST /api/match-mentor { goal: string }
- *   - Mevcut öğretmenleri Claude'a verir, kullanıcının hedefine en uygun
- *     1-3 mentor önerir (id + neden).
- *   - ANTHROPIC_API_KEY tanımlı değilse heuristik fallback: skill/category
+ *   - Mevcut öğretmenleri Google Gemini'ye verir, kullanıcının hedefine
+ *     en uygun 1-3 mentor önerir (id + neden).
+ *   - GEMINI_API_KEY tanımlı değilse heuristik fallback: skill/category
  *     metin eşleşmesi ile en yüksek rating'liyi döner.
+ *
+ * Gemini free tier: 15 RPM / 1500 RPD (gemini-2.0-flash) — demo için yeterli.
+ * Anahtar: https://aistudio.google.com/app/apikey
  */
 import { Router } from "express";
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenAI } from "@google/genai";
 import { prisma } from "../prisma";
 import { requireUser } from "../auth";
 import { serializeTeacher } from "../serialize";
@@ -18,8 +21,8 @@ matchRouter.use(requireUser);
 
 type Recommendation = { teacherId: string; reason: string };
 
-const apiKey = process.env.ANTHROPIC_API_KEY;
-const anthropic = apiKey ? new Anthropic({ apiKey }) : null;
+const apiKey = process.env.GEMINI_API_KEY;
+const genai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 matchRouter.post("/", async (req, res) => {
   const goal = String(req.body?.goal ?? "").trim();
@@ -45,37 +48,26 @@ matchRouter.post("/", async (req, res) => {
 
   let recommendations: Recommendation[] = [];
 
-  if (anthropic) {
+  if (genai) {
     try {
-      const message = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 600,
-        system:
-          "Sen PeerUP adlı bir öğrenme platformunda öğrencilere mentor öneren bir yardımcısın. " +
-          "Verilen mentor listesinden öğrencinin hedefine en uygun 1 ila 3 mentoru seç. " +
-          "Cevabını SADECE şu JSON formatında ver, başka metin yazma: " +
-          `{"recommendations":[{"teacherId":"...","reason":"Türkçe kısa gerekçe (~140 karakter)"}, ...]}`,
-        messages: [
-          {
-            role: "user",
-            content: `Öğrenci hedefi: "${goal}"\n\nMentor listesi (JSON):\n${JSON.stringify(summary)}`,
-          },
-        ],
+      const response = await genai.models.generateContent({
+        model: "gemini-2.0-flash",
+        contents: `Öğrenci hedefi: "${goal}"\n\nMentor listesi (JSON):\n${JSON.stringify(summary)}`,
+        config: {
+          systemInstruction:
+            "Sen PeerUP adlı bir öğrenme platformunda öğrencilere mentor öneren bir yardımcısın. " +
+            "Verilen mentor listesinden öğrencinin hedefine en uygun 1 ila 3 mentoru seç. " +
+            "JSON dön: {\"recommendations\":[{\"teacherId\":\"...\",\"reason\":\"Türkçe kısa gerekçe (~140 karakter)\"}]}",
+          responseMimeType: "application/json",
+        },
       });
-      const text =
-        message.content
-          .filter((c) => c.type === "text")
-          .map((c) => (c as { text: string }).text)
-          .join("") ?? "";
-      const match = text.match(/\{[\s\S]*\}/);
-      if (match) {
-        const parsed = JSON.parse(match[0]) as { recommendations?: Recommendation[] };
-        recommendations = Array.isArray(parsed.recommendations)
-          ? parsed.recommendations.slice(0, 3)
-          : [];
-      }
+      const text = response.text ?? "";
+      const parsed = JSON.parse(text) as { recommendations?: Recommendation[] };
+      recommendations = Array.isArray(parsed.recommendations)
+        ? parsed.recommendations.slice(0, 3)
+        : [];
     } catch (e) {
-      console.warn("[match] Claude hatası, fallback'e geçiliyor:", e);
+      console.warn("[match] Gemini hatası, fallback'e geçiliyor:", e);
     }
   }
 
@@ -86,8 +78,10 @@ matchRouter.post("/", async (req, res) => {
     const scored = teachers
       .map((t) => {
         const text = `${t.skill} ${t.category} ${t.bio}`.toLowerCase();
-        const overlap = text.split(/\s+/).filter((w) => goalLower.includes(w)).length;
-        return { t, score: overlap + t.rating };
+        const overlap = text
+          .split(/\s+/)
+          .filter((w) => w.length > 2 && goalLower.includes(w)).length;
+        return { t, score: overlap * 2 + t.rating };
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, 3);
@@ -108,5 +102,5 @@ matchRouter.post("/", async (req, res) => {
       reason: r.reason,
     }));
 
-  res.json({ recommendations: result, usedAi: !!anthropic });
+  res.json({ recommendations: result, usedAi: !!genai });
 });

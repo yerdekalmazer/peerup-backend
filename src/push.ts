@@ -25,9 +25,25 @@ export async function sendPushToUser(userId: string, payload: PushPayload) {
   try {
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { pushToken: true },
+      select: { pushToken: true, notifPrefs: true },
     });
     if (!user?.pushToken || !Expo.isExpoPushToken(user.pushToken)) return;
+
+    // Kullanıcı tercihine göre filtre. Type prefix'lerinden hangi kategori
+    // olduğunu çıkarıyoruz: session*/coin*/message → ilgili pref.
+    try {
+      const prefs = JSON.parse(user.notifPrefs ?? "{}") as {
+        sessions?: boolean;
+        messages?: boolean;
+        coins?: boolean;
+      };
+      const type = String(payload.data?.type ?? "");
+      if (type.startsWith("session") && prefs.sessions === false) return;
+      if (type === "message" && prefs.messages === false) return;
+      if (type === "coin" && prefs.coins === false) return;
+    } catch {
+      // pref parse edilemezse default davranış (gönder)
+    }
 
     const message: ExpoPushMessage = {
       to: user.pushToken,

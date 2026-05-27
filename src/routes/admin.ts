@@ -1140,3 +1140,93 @@ adminRouter.get("/exports/sessions.csv", async (req, res) => {
   );
   res.send(csv);
 });
+
+// ── Mentor Başvuruları ──────────────────────────────────────
+// GET /admin/applications?status=pending|approved|rejected
+adminRouter.get("/applications", async (req, res) => {
+  const status = req.query.status as string | undefined;
+  const where =
+    status && ["pending", "approved", "rejected"].includes(status)
+      ? { mentorAppStatus: status }
+      : { mentorAppStatus: { not: null } };
+  const users = await prisma.user.findMany({
+    where,
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      avatar: true,
+      avatarColor: true,
+      bio: true,
+      university: true,
+      department: true,
+      role: true,
+      mentorAppStatus: true,
+      mentorAppMessage: true,
+      mentorAppAt: true,
+    },
+    orderBy: { mentorAppAt: "desc" },
+  });
+  res.json(users);
+});
+
+// POST /admin/applications/:userId/approve
+adminRouter.post("/applications/:userId/approve", async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!user || !user.mentorAppStatus) {
+    return res.status(404).json({ error: "Başvuru bulunamadı" });
+  }
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { role: "teacher", mentorAppStatus: "approved" },
+  });
+  await prisma.notification.create({
+    data: {
+      userId: user.id,
+      type: "info",
+      title: "Mentor başvurun onaylandı 🎓",
+      body: "Artık mentor olarak ders verebilirsin. Profilinden becerilerini güncelle.",
+      icon: "school-outline",
+    },
+  });
+  await writeAudit({
+    adminId: req.adminId!,
+    action: "application.approve",
+    targetType: "user",
+    targetId: user.id,
+    payload: { email: user.email },
+  });
+  res.json({ ok: true });
+});
+
+// POST /admin/applications/:userId/reject  body: { reason? }
+adminRouter.post("/applications/:userId/reject", async (req, res) => {
+  const user = await prisma.user.findUnique({ where: { id: req.params.userId } });
+  if (!user || !user.mentorAppStatus) {
+    return res.status(404).json({ error: "Başvuru bulunamadı" });
+  }
+  const reason = String(req.body?.reason ?? "").slice(0, 300);
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { mentorAppStatus: "rejected" },
+  });
+  await prisma.notification.create({
+    data: {
+      userId: user.id,
+      type: "info",
+      title: "Başvurun reddedildi",
+      body:
+        reason ||
+        "Başvurun bu sefer kabul edilmedi. Açıklamanı geliştirip tekrar başvurabilirsin.",
+      icon: "close-circle-outline",
+    },
+  });
+  await writeAudit({
+    adminId: req.adminId!,
+    action: "application.reject",
+    targetType: "user",
+    targetId: user.id,
+    payload: { reason },
+  });
+  res.json({ ok: true });
+});

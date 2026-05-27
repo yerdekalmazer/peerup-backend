@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { prisma } from "../prisma";
-import { requireUser } from "../auth";
+import { requireUser, verifyPassword } from "../auth";
 import { publicUser, serializeTeacher, safeParse } from "../serialize";
 import { sendPushToUser } from "../push";
 
@@ -50,12 +50,112 @@ profileRouter.put("/", async (req, res) => {
   res.json(publicUser(user));
 });
 
+/**
+ * GET /profile/availability — mentor kendi haftalık müsaitliğini okur.
+ * Eşleşen Teacher kaydını name üzerinden bulur.
+ */
+profileRouter.get("/availability", async (req, res) => {
+  const me = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!me) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  if (me.role !== "teacher") {
+    return res.status(403).json({ error: "Bu uç sadece mentorlar için" });
+  }
+  const teacher = await prisma.teacher.findFirst({ where: { name: me.name } });
+  type Slot = { dayOfWeek: number; start: string; end: string };
+  const slots: Slot[] = teacher?.availability
+    ? (safeParse(teacher.availability) as Slot[])
+    : [];
+  res.json({ availability: slots });
+});
+
+/**
+ * PUT /profile/availability — mentor haftalık müsaitliğini günceller.
+ * Body: { availability: [{ dayOfWeek, start, end }, ...] }
+ * dayOfWeek: 0..6 (JS Date.getDay), start/end: "HH:MM"
+ */
+profileRouter.put("/availability", async (req, res) => {
+  const me = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!me) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  if (me.role !== "teacher") {
+    return res.status(403).json({ error: "Bu uç sadece mentorlar için" });
+  }
+  const teacher = await prisma.teacher.findFirst({ where: { name: me.name } });
+  if (!teacher) {
+    return res.status(404).json({ error: "Eşleşen öğretmen kaydı yok" });
+  }
+
+  const raw = Array.isArray(req.body?.availability) ? req.body.availability : [];
+  const re = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const slots: Array<{ dayOfWeek: number; start: string; end: string }> = [];
+  for (const s of raw) {
+    const day = Number(s?.dayOfWeek);
+    const start = String(s?.start ?? "");
+    const end = String(s?.end ?? "");
+    if (!Number.isInteger(day) || day < 0 || day > 6) continue;
+    if (!re.test(start) || !re.test(end)) continue;
+    if (start >= end) continue;
+    slots.push({ dayOfWeek: day, start, end });
+  }
+
+  await prisma.teacher.update({
+    where: { id: teacher.id },
+    data: { availability: JSON.stringify(slots) },
+  });
+  res.json({ availability: slots });
+});
+
+// GET /profile/earnings — mentor için kazanç özeti.
+profileRouter.get("/earnings", async (req, res) => {
+  const me = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!me) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  if (me.role !== "teacher") {
+    return res.status(403).json({ error: "Bu uç sadece mentorlar için" });
+  }
+
+  const completed = await prisma.session.findMany({
+    where: { teacherName: me.name, status: "completed" },
+    select: { cost: true, createdAt: true, skill: true },
+  });
+  const totalEarned = completed.reduce((acc, s) => acc + s.cost, 0);
+  const monthStart = new Date();
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const thisMonth = completed
+    .filter((s) => s.createdAt >= monthStart)
+    .reduce((acc, s) => acc + s.cost, 0);
+
+  const upcoming = await prisma.session.count({
+    where: { teacherName: me.name, status: "upcoming" },
+  });
+
+  const earnTransactions = await prisma.coinTransaction.findMany({
+    where: { userId: me.id, type: "earn" },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+  });
+
+  res.json({
+    totalEarned: Number(totalEarned.toFixed(2)),
+    thisMonth: Number(thisMonth.toFixed(2)),
+    completedCount: completed.length,
+    upcomingCount: upcoming,
+    recentTransactions: earnTransactions,
+  });
+});
+
 // DELETE /profile — hesabı kalıcı olarak siler.
+// Body: { password } — güvenlik için parola yeniden doğrulanır.
 // Notification, Conversation, Review, CoinTransaction cascade ile silinir;
 // Session'larda userId SetNull yapılır (geçmiş istatistik için kayıt kalır).
 profileRouter.delete("/", async (req, res) => {
   const user = await prisma.user.findUnique({ where: { id: req.userId } });
   if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  const password = String(req.body?.password ?? "");
+  if (!password) {
+    return res.status(400).json({ error: "Hesabını silmek için parolanı girmelisin" });
+  }
+  const ok = await verifyPassword(password, user.passwordHash);
+  if (!ok) return res.status(403).json({ error: "Parola hatalı" });
   await prisma.user.delete({ where: { id: user.id } });
   res.json({ ok: true });
 });
@@ -104,6 +204,27 @@ profileRouter.post("/apply-mentor", async (req, res) => {
     },
   });
   res.status(201).json({ ok: true });
+});
+
+/**
+ * PUT /profile/notif-prefs — kullanıcı bildirim tercihlerini günceller.
+ * Body: { sessions?, messages?, coins? } (her biri boolean).
+ */
+profileRouter.put("/notif-prefs", async (req, res) => {
+  const me = await prisma.user.findUnique({ where: { id: req.userId } });
+  if (!me) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  const existing = safeParse(me.notifPrefs ?? '{}') as unknown as Record<string, boolean>;
+  const cur = (Array.isArray(existing) ? {} : existing) ?? {};
+  const next: Record<string, boolean> = {
+    sessions: typeof req.body?.sessions === "boolean" ? req.body.sessions : cur.sessions ?? true,
+    messages: typeof req.body?.messages === "boolean" ? req.body.messages : cur.messages ?? true,
+    coins: typeof req.body?.coins === "boolean" ? req.body.coins : cur.coins ?? true,
+  };
+  await prisma.user.update({
+    where: { id: me.id },
+    data: { notifPrefs: JSON.stringify(next) },
+  });
+  res.json({ notifPrefs: next });
 });
 
 // PUT /profile/push-token — Expo push token kaydet ({ token, platform })

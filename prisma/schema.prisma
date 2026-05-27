@@ -81,6 +81,9 @@ model User {
   mentorAppStatus  String?
   mentorAppMessage String?
   mentorAppAt      DateTime?
+  emailVerified    Boolean  @default(false)
+  /// Push tercihleri JSON: { sessions: bool, messages: bool, coins: bool }
+  notifPrefs       String   @default("{\"sessions\":true,\"messages\":true,\"coins\":true}")
   createdAt     DateTime         @default(now())
   sessions      Session[]
   conversations Conversation[]
@@ -137,12 +140,41 @@ model Session {
   status        String   @default("upcoming")
   type          String   @default("online")
   rating        Int?
+  /// Aynı saatte aynı mentor için kaç öğrenci alınabilir. Default 1 (bireysel).
+  maxParticipants Int    @default(1)
+  /// Grup oturumu ise hangi slot'a bağlı (mentor tarafından açılan).
+  groupSlot     GroupSlot? @relation(fields: [groupSlotId], references: [id], onDelete: SetNull)
+  groupSlotId   String?
   callStarted   Boolean  @default(false)
   callRoomId    String?
   callStartedAt DateTime?
   callEndedAt   DateTime?
   createdAt     DateTime @default(now())
   review        Review?
+}
+
+/// Mentor'un açtığı grup oturumu slotu. Öğrenciler join'leyince
+/// her biri için ayrı bir Session kaydı oluşur, hepsi `groupSlotId` ile
+/// bu kayda bağlanır.
+model GroupSlot {
+  id              String    @id @default(cuid())
+  mentorUserId    String
+  teacherName     String
+  teacherAvatar   String    @default("")
+  avatarColor     String    @default("#6366F1")
+  skill           String
+  description     String    @default("")
+  date            String
+  time            String
+  duration        Int       @default(60)
+  costPerSeat     Float     @default(1)
+  maxParticipants Int       @default(4)
+  status          String    @default("upcoming") // upcoming | cancelled | completed
+  createdAt       DateTime  @default(now())
+  sessions        Session[]
+
+  @@index([mentorUserId])
+  @@index([status, date])
 }
 
 /// Mentor zincirleri
@@ -184,6 +216,9 @@ model Conversation {
   id         String    @id @default(cuid())
   owner      User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   ownerId    String
+  /// İki yönlü mesajlaşma için karşı kullanıcının User.id'si.
+  /// Eski (mock) conversation'larda null kalabilir; o durumda push/broadcast atılmaz.
+  peerUserId String?
   peerName   String
   peerAvatar String
   peerColor  String    @default("#6366F1")

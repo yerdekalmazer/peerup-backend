@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { prisma } from "../prisma";
 import { requireUser } from "../auth";
+import { sendPushToUser } from "../push";
 
 export const messagesRouter = Router();
 messagesRouter.use(requireUser);
@@ -40,16 +41,23 @@ messagesRouter.get("/", async (req, res) => {
 messagesRouter.post("/", async (req, res) => {
   const peerName = String(req.body?.peerName ?? "").trim();
   if (!peerName) return res.status(400).json({ error: "Karşı taraf adı gerekli" });
+  const peerUserId =
+    typeof req.body?.peerUserId === "string" && req.body.peerUserId.length > 0
+      ? req.body.peerUserId
+      : null;
 
-  // Aynı kişiyle sohbet varsa onu döndür
+  // Aynı kişiyle sohbet varsa onu döndür (peerUserId varsa o önceliklidir)
   const existing = await prisma.conversation.findFirst({
-    where: { ownerId: req.userId, peerName },
+    where: peerUserId
+      ? { ownerId: req.userId, peerUserId }
+      : { ownerId: req.userId, peerName },
   });
   if (existing) return res.json(existing);
 
   const conversation = await prisma.conversation.create({
     data: {
       ownerId: req.userId!,
+      peerUserId,
       peerName,
       peerAvatar: String(req.body?.peerAvatar ?? peerName.slice(0, 2).toUpperCase()),
       peerColor: String(req.body?.peerColor ?? "#6366F1"),
@@ -178,6 +186,50 @@ messagesRouter.post("/:id/messages", async (req, res) => {
     where: { id: conversation.id },
     data: { updatedAt: new Date() },
   });
+
+  // İki yönlü teslimat: peerUserId varsa karşı tarafın kendi conversation'ına
+  // mesajı (fromOwner=false) ekle ve push at. peerUserId null ise (eski mock
+  // conversation'lar) hiçbir şey yapma.
+  if (conversation.peerUserId) {
+    const me = await prisma.user.findUnique({
+      where: { id: req.userId },
+      select: { id: true, name: true, avatar: true, avatarColor: true },
+    });
+    if (me) {
+      let peerConv = await prisma.conversation.findFirst({
+        where: { ownerId: conversation.peerUserId, peerUserId: me.id },
+      });
+      if (!peerConv) {
+        peerConv = await prisma.conversation.create({
+          data: {
+            ownerId: conversation.peerUserId,
+            peerUserId: me.id,
+            peerName: me.name,
+            peerAvatar: me.avatar || me.name.slice(0, 2).toUpperCase(),
+            peerColor: me.avatarColor || "#6366F1",
+          },
+        });
+      }
+      await prisma.message.create({
+        data: {
+          conversationId: peerConv.id,
+          fromOwner: false,
+          text,
+          imageUrl,
+          read: false,
+        },
+      });
+      await prisma.conversation.update({
+        where: { id: peerConv.id },
+        data: { updatedAt: new Date() },
+      });
+      void sendPushToUser(conversation.peerUserId, {
+        title: me.name,
+        body: text || (imageUrl ? "📷 Fotoğraf" : ""),
+        data: { type: "message", conversationId: peerConv.id },
+      });
+    }
+  }
 
   res.status(201).json({
     id: message.id,

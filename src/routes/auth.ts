@@ -7,6 +7,7 @@ import {
   signAdminToken,
 } from "../auth";
 import { publicUser } from "../serialize";
+import { sendMail, codeEmailHtml } from "../email";
 
 export const authRouter = Router();
 
@@ -56,9 +57,48 @@ authRouter.post("/register", async (req, res) => {
     },
   });
 
+  const isDev = process.env.NODE_ENV !== "production";
+  const devCode = makeVerifyCode(email);
+
   res
     .status(201)
-    .json({ user: publicUser(user), token: signUserToken(user.id) });
+    .json({
+      user: publicUser(user),
+      token: signUserToken(user.id),
+      ...(isDev ? { devVerifyCode: devCode } : {}),
+    });
+});
+
+authRouter.post("/send-verify-email", async (req, res) => {
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: "E-posta zorunlu" });
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return res.json({ ok: true }); // sızdırma
+  if (user.emailVerified) return res.json({ ok: true, alreadyVerified: true });
+  const code = makeVerifyCode(email);
+  const isDev = process.env.NODE_ENV !== "production";
+  res.json({ ok: true, ...(isDev ? { devCode: code } : {}) });
+});
+
+authRouter.post("/verify-email", async (req, res) => {
+  pruneVerifyStore();
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  const code = String(req.body?.code ?? "").trim();
+  if (!email || !code) {
+    return res.status(400).json({ error: "E-posta ve kod gerekli" });
+  }
+  const entry = verifyStore.get(email);
+  if (!entry || entry.expiresAt < Date.now() || entry.code !== code) {
+    return res.status(400).json({ error: "Kod hatalı veya süresi dolmuş" });
+  }
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return res.status(404).json({ error: "Kullanıcı bulunamadı" });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { emailVerified: true },
+  });
+  verifyStore.delete(email);
+  res.json({ ok: true });
 });
 
 // POST /auth/login — mobil uygulama girişi
@@ -129,6 +169,32 @@ type ResetEntry = { code: string; expiresAt: number; userId: string };
 const resetStore = new Map<string, ResetEntry>();
 const RESET_TTL_MS = 10 * 60 * 1000;
 
+// Email doğrulama kodları — aynı pattern, ayrı map.
+const verifyStore = new Map<string, { code: string; expiresAt: number }>();
+const VERIFY_TTL_MS = 30 * 60 * 1000;
+function pruneVerifyStore() {
+  const now = Date.now();
+  for (const [email, entry] of verifyStore.entries()) {
+    if (entry.expiresAt < now) verifyStore.delete(email);
+  }
+}
+function makeVerifyCode(email: string) {
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  verifyStore.set(email, { code, expiresAt: Date.now() + VERIFY_TTL_MS });
+  console.log(`[auth] verify code for ${email}: ${code}`);
+  void sendMail({
+    to: email,
+    subject: "PeerUP — E-posta doğrulama kodun",
+    html: codeEmailHtml({
+      title: "E-postanı doğrula",
+      intro: "PeerUP hesabını aktif etmek için bu 6 haneli kodu kullan:",
+      code,
+      ttlMinutes: 30,
+    }),
+  });
+  return code;
+}
+
 function pruneResetStore() {
   const now = Date.now();
   for (const [email, entry] of resetStore.entries()) {
@@ -153,7 +219,16 @@ authRouter.post("/forgot-password", async (req, res) => {
       userId: user.id,
     });
     console.log(`[auth] reset code for ${email}: ${code}`);
-    // TODO: production'da bu kodu email ile gönder.
+    void sendMail({
+      to: email,
+      subject: "PeerUP — Şifre sıfırlama kodun",
+      html: codeEmailHtml({
+        title: "Şifre sıfırlama kodun",
+        intro: "Aşağıdaki 6 haneli kodu uygulamada \"Şifre Sıfırla\" ekranına gir:",
+        code,
+        ttlMinutes: 10,
+      }),
+    });
   }
 
   const isDev = process.env.NODE_ENV !== "production";
