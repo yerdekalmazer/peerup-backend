@@ -8,6 +8,7 @@ import {
 } from "../auth";
 import { publicUser } from "../serialize";
 import { sendMail, codeEmailHtml } from "../email";
+import { OAuth2Client } from "google-auth-library";
 
 export const authRouter = Router();
 
@@ -116,6 +117,86 @@ authRouter.post("/login", async (req, res) => {
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) {
     return res.status(401).json({ error: "E-posta veya parola hatalı" });
+  }
+
+  res.json({ user: publicUser(user), token: signUserToken(user.id) });
+});
+
+/**
+ * POST /auth/google
+ * Body: { idToken: string }
+ *
+ * Mobil tarafta `expo-auth-session/providers/google` ile alınan id_token
+ * burada doğrulanır. Audience olarak env'deki Google OAuth client ID'leri
+ * kabul edilir (iOS / Android / Web — virgülle ayırarak ekle).
+ *
+ * Kullanıcı yoksa otomatik kayıt olur (emailVerified: true, çünkü Google
+ * adresi zaten doğrulamış demektir). Varsa direkt login eder.
+ */
+const googleAudiences = (process.env.GOOGLE_CLIENT_IDS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const googleClient = new OAuth2Client();
+
+authRouter.post("/google", async (req, res) => {
+  const idToken = String(req.body?.idToken ?? "");
+  if (!idToken) return res.status(400).json({ error: "idToken gerekli" });
+  if (googleAudiences.length === 0) {
+    return res
+      .status(500)
+      .json({ error: "Google girişi henüz yapılandırılmadı" });
+  }
+
+  let payload;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: googleAudiences,
+    });
+    payload = ticket.getPayload();
+  } catch (e) {
+    console.warn("[auth/google] token doğrulanamadı:", e);
+    return res.status(401).json({ error: "Google token geçersiz" });
+  }
+
+  if (!payload?.email || !payload.email_verified) {
+    return res.status(401).json({ error: "Google hesabı doğrulanmamış" });
+  }
+  const email = payload.email.toLowerCase();
+  const name = payload.name || email.split("@")[0];
+
+  let user = await prisma.user.findUnique({ where: { email } });
+  if (!user) {
+    const avatar = name
+      .split(" ")
+      .map((p) => p[0])
+      .slice(0, 2)
+      .join("")
+      .toUpperCase();
+    user = await prisma.user.create({
+      data: {
+        name,
+        email,
+        passwordHash: "", // Google girişli kullanıcı için boş; reset-password ile sonradan ayarlanabilir
+        avatar,
+        emailVerified: true,
+      },
+    });
+    await prisma.notification.create({
+      data: {
+        userId: user.id,
+        type: "info",
+        title: "PeerUP'a hoş geldin! 🎉",
+        body: "Google hesabınla giriş yaptın.",
+        icon: "sparkles-outline",
+      },
+    });
+  } else if (!user.emailVerified) {
+    user = await prisma.user.update({
+      where: { id: user.id },
+      data: { emailVerified: true },
+    });
   }
 
   res.json({ user: publicUser(user), token: signUserToken(user.id) });
