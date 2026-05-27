@@ -96,6 +96,40 @@ publicRouter.get("/teachers/:id/availability", async (req, res) => {
   res.json({ availableTimes, bookedTimes, dayOfWeek });
 });
 
+/**
+ * GET /users/search?q= — yeni sohbet açmak için kullanıcı arar.
+ * Auth gerekli (sadece kayıtlı kullanıcılar arasında).
+ * `Teacher` listesinden farklı: User tablosundan döner, peerUserId
+ * conversation kaydında kullanılır.
+ */
+publicRouter.get("/users/search", async (req, res) => {
+  const q = (req.query.q as string | undefined)?.trim() ?? "";
+  const where = q
+    ? {
+        OR: [
+          { name: { contains: q } },
+          { email: { contains: q } },
+        ],
+        status: "active",
+      }
+    : { status: "active" };
+  const users = await prisma.user.findMany({
+    where,
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      avatar: true,
+      avatarColor: true,
+      role: true,
+      bio: true,
+    },
+    orderBy: { name: "asc" },
+    take: 30,
+  });
+  res.json(users);
+});
+
 // GET /categories
 publicRouter.get("/categories", async (_req, res) => {
   const categories = await prisma.category.findMany({

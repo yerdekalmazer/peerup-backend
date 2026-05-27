@@ -1180,6 +1180,41 @@ adminRouter.post("/applications/:userId/approve", async (req, res) => {
     where: { id: user.id },
     data: { role: "teacher", mentorAppStatus: "approved" },
   });
+
+  // Mentor onaylandığında Teacher kaydı yarat (yoksa). Discover/availability/earnings
+  // endpoint'leri User.name == Teacher.name eşleşmesi ile çalıştığı için bu zorunlu.
+  const existing = await prisma.teacher.findFirst({ where: { name: user.name } });
+  if (!existing) {
+    const skillsTeach: string[] = (() => {
+      try {
+        return JSON.parse(user.skillsTeach ?? "[]");
+      } catch {
+        return [];
+      }
+    })();
+    const defaultAvailability = [
+      ...[1, 2, 3, 4, 5].flatMap((d) => [
+        { dayOfWeek: d, start: "09:00", end: "12:00" },
+        { dayOfWeek: d, start: "13:00", end: "17:00" },
+      ]),
+      { dayOfWeek: 6, start: "10:00", end: "14:00" },
+    ];
+    await prisma.teacher.create({
+      data: {
+        name: user.name,
+        skill: skillsTeach[0] ?? "Genel",
+        category: "Genel",
+        avatar: user.avatar || user.name.slice(0, 2).toUpperCase(),
+        avatarColor: user.avatarColor || "#6366F1",
+        bio: user.bio || "",
+        coinRate: 1,
+        verified: true,
+        badges: JSON.stringify(["Doğrulanmış"]),
+        availability: JSON.stringify(defaultAvailability),
+      },
+    });
+  }
+
   await prisma.notification.create({
     data: {
       userId: user.id,
