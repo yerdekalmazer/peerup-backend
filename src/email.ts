@@ -1,41 +1,32 @@
 /**
- * Gmail SMTP üzerinden email gönderim helper'ı.
+ * Email gönderim helper'ı — Brevo (eski Sendinblue) HTTP API'sini kullanır.
+ *
+ * Neden HTTP API: Render free tier'da outbound SMTP portları (465/587)
+ * sessizce drop edilebiliyor. HTTP API HTTPS (443) üzerinden çalıştığı için
+ * bu kısıtlamadan etkilenmez. Bonus: domain doğrulaması gerekmez, sadece
+ * tek bir sender email'inin Brevo tarafında onaylanması yeterli.
  *
  * Kurulum:
- *   1. https://myaccount.google.com/security
- *      → "2-Step Verification"u açık tut (zorunlu).
- *   2. https://myaccount.google.com/apppasswords
- *      → Yeni "App password" oluştur (Mail + Other "PeerUP").
- *      → 16 haneli kodu kopyala (boşluklar olmadan).
- *   3. .env (lokal) ve Render env:
- *        SMTP_USER="senin@gmail.com"
- *        SMTP_PASS="16haneliappkodu"
- *        SMTP_FROM="PeerUP <senin@gmail.com>"   (opsiyonel)
+ *   1. https://app.brevo.com → ücretsiz hesap (300 mail/gün kalıcı).
+ *   2. Settings → Senders & IP → Senders → "Add a sender":
+ *        - Name: PeerUP
+ *        - Email: tyerdekalmazer01@gmail.com  (gönderici olarak görünür)
+ *        - Brevo bu adrese doğrulama maili atar, link'e tıkla.
+ *   3. SMTP & API → API Keys → "Generate a new API key" → kopyala.
+ *   4. Lokal .env ve Render env'e ekle:
+ *        BREVO_API_KEY="xkeysib-..."
+ *        EMAIL_FROM="tyerdekalmazer01@gmail.com"
+ *        EMAIL_FROM_NAME="PeerUP"
  *
- * Notlar:
- *   - Env eksikse fonksiyon sessizce no-op olur ve `false` döner.
- *     Asıl akış (kod üretimi, vb.) bu yüzden bozulmaz.
- *   - Gmail SMTP gönderici adresini değiştirmene izin vermez —
- *     SMTP_FROM her ne olursa olsun mail SMTP_USER'dan gönderilmiş gözükür.
+ * Env eksikse `sendMail` no-op olur ve `false` döner; ana akış bozulmaz.
  */
-import nodemailer, { type Transporter } from "nodemailer";
 
-const SMTP_USER = process.env.SMTP_USER ?? "";
-const SMTP_PASS = process.env.SMTP_PASS ?? "";
-const SMTP_FROM = process.env.SMTP_FROM ?? SMTP_USER;
-
-let transporter: Transporter | null = null;
-if (SMTP_USER && SMTP_PASS) {
-  transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-}
+const BREVO_API_KEY = process.env.BREVO_API_KEY ?? "";
+const EMAIL_FROM = process.env.EMAIL_FROM ?? "";
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME ?? "PeerUP";
 
 export function isEmailConfigured(): boolean {
-  return !!transporter;
+  return !!(BREVO_API_KEY && EMAIL_FROM);
 }
 
 type SendArgs = {
@@ -46,18 +37,36 @@ type SendArgs = {
 };
 
 export async function sendMail(args: SendArgs): Promise<boolean> {
-  if (!transporter) {
-    console.warn("[email] SMTP konfigi eksik, mail gönderilmedi:", args.subject);
+  if (!isEmailConfigured()) {
+    console.warn(
+      "[email] BREVO_API_KEY/EMAIL_FROM eksik, mail gönderilmedi:",
+      args.subject,
+    );
     return false;
   }
   try {
-    await transporter.sendMail({
-      from: SMTP_FROM,
-      to: args.to,
-      subject: args.subject,
-      html: args.html,
-      text: args.text ?? args.html.replace(/<[^>]+>/g, ""),
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        accept: "application/json",
+        "api-key": BREVO_API_KEY,
+      },
+      body: JSON.stringify({
+        sender: { name: EMAIL_FROM_NAME, email: EMAIL_FROM },
+        to: [{ email: args.to }],
+        subject: args.subject,
+        htmlContent: args.html,
+        textContent: args.text ?? args.html.replace(/<[^>]+>/g, ""),
+      }),
     });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.warn(
+        `[email] Brevo ${res.status} ${res.statusText}: ${body.slice(0, 200)}`,
+      );
+      return false;
+    }
     return true;
   } catch (e) {
     console.warn("[email] gönderim hatası:", e);
